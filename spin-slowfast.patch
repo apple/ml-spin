@@ -1,0 +1,268 @@
+From e7da51cf65760421cc5d86b405dc2ec0d7e240f8 Mon Sep 17 00:00:00 2001
+From: Chien-Yu Lin <cyulin@cs.washington.edu>
+Date: Tue, 14 Jun 2022 23:06:30 +0000
+Subject: [PATCH 1/2] update slowfast for spin
+
+---
+ setup.py                             |  2 +-
+ slowfast/config/defaults.py          | 46 ++++++++++++++++++++++++++++
+ slowfast/datasets/imagenet.py        |  2 +-
+ slowfast/models/__init__.py          |  7 +++++
+ slowfast/models/build.py             |  3 +-
+ slowfast/utils/lr_policy.py          | 10 ++++++
+ slowfast/utils/misc.py               |  6 +++-
+ slowfast/utils/weight_init_helper.py |  4 +--
+ tools/train_net.py                   |  4 +--
+ 9 files changed, 75 insertions(+), 9 deletions(-)
+
+diff --git a/setup.py b/setup.py
+index afeab49..9daae52 100644
+--- a/setup.py
++++ b/setup.py
+@@ -23,7 +23,7 @@ setup(
+         "opencv-python",
+         "pandas",
+         "torchvision>=0.4.2",
+-        "PIL",
++        "Pillow",
+         "sklearn",
+         "tensorboard",
+     ],
+diff --git a/slowfast/config/defaults.py b/slowfast/config/defaults.py
+index e20ef02..eead08c 100644
+--- a/slowfast/config/defaults.py
++++ b/slowfast/config/defaults.py
+@@ -378,6 +378,52 @@ _C.MVIT.SEP_POS_EMBED = False
+ _C.MVIT.DROPOUT_RATE = 0.0
+ 
+ 
++# -----------------------------------------------------------------------------
++# ConvMixer options
++# -----------------------------------------------------------------------------
++_C.CONVMIXER = CfgNode()
++
++# Number of weight layers.
++_C.CONVMIXER.DEPTH = 32
++
++# Dim of the hidden features
++_C.CONVMIXER.CHANNEL = 768
++
++# Size of the input patch kernel
++_C.CONVMIXER.PATCH_KERNEL = 7
++
++# Size of the input patch kernel stride
++_C.CONVMIXER.PATCH_STRIDE = 7
++
++# Size of the input patch kernel stride
++_C.CONVMIXER.PATCH_PADDING = 0
++
++# Size of the conv kernel
++_C.CONVMIXER.KERNEL = 3
++
++# Size of the conv kernel
++_C.CONVMIXER.ACT_FUNC = "RELU"
++
++# Create a new node for configure WeightSharedConvMixer block
++_C.CONVMIXER.WEIGHT_SHARE = CfgNode()
++
++# Whether to use WeightSharedConvMixer
++_C.CONVMIXER.WEIGHT_SHARE.ENABLE = False
++
++# The overall sharing structure.
++_C.CONVMIXER.WEIGHT_SHARE.SHARING_DISTRIBUTION = "uniform"
++
++# The sharing mapping scheme. Choose from ["sequential", "strided", "random"]
++_C.CONVMIXER.WEIGHT_SHARE.SHARING_MAPPING = "sequential"
++
++# Sharing rate
++_C.CONVMIXER.WEIGHT_SHARE.SHARE_RATE = 1
++
++# Wegith fusion methods. Choose from ["mean", "choose_first", "scalar_weighted_mean", "channel_weighted_mean"]
++# No weight fusion will be applied when it's set to None
++_C.CONVMIXER.WEIGHT_SHARE.REDUCTION_FN = None
++
++
+ # -----------------------------------------------------------------------------
+ # SlowFast options
+ # -----------------------------------------------------------------------------
+diff --git a/slowfast/datasets/imagenet.py b/slowfast/datasets/imagenet.py
+index af96403..ef6fb8d 100644
+--- a/slowfast/datasets/imagenet.py
++++ b/slowfast/datasets/imagenet.py
+@@ -110,7 +110,7 @@ class Imagenet(torch.utils.data.Dataset):
+         else:
+             # For testing use scale and center crop
+             im, _ = transform.uniform_crop(
+-                im, test_size, spatial_idx=1, scale_size=train_size
++                im, test_size, spatial_idx=1, scale_size=test_size
+             )
+         # For training and testing use color normalization
+         im = transform.color_normalization(
+diff --git a/slowfast/models/__init__.py b/slowfast/models/__init__.py
+index ce97190..906b230 100644
+--- a/slowfast/models/__init__.py
++++ b/slowfast/models/__init__.py
+@@ -5,6 +5,13 @@ from .build import MODEL_REGISTRY, build_model  # noqa
+ from .custom_video_model_builder import *  # noqa
+ from .video_model_builder import ResNet, SlowFast  # noqa
+ 
++# import our model from outside directory
++import os, sys
++dir_path = os.path.dirname(os.path.realpath(__file__))
++dir_path = os.path.join(dir_path, '..', '..', '..', 'models')
++sys.path.insert(1, dir_path)
++from image_model_builder import *
++
+ try:
+     from .ptv_model_builder import (
+         PTVCSN,
+diff --git a/slowfast/models/build.py b/slowfast/models/build.py
+index a88eb51..a1424ff 100644
+--- a/slowfast/models/build.py
++++ b/slowfast/models/build.py
+@@ -48,6 +48,7 @@ def build_model(cfg, gpu_id=None):
+     if cfg.NUM_GPUS > 1:
+         # Make model replica operate on the current device
+         model = torch.nn.parallel.DistributedDataParallel(
+-            module=model, device_ids=[cur_device], output_device=cur_device
++            module=model, device_ids=[cur_device], output_device=cur_device,
++            find_unused_parameters=True
+         )
+     return model
+diff --git a/slowfast/utils/lr_policy.py b/slowfast/utils/lr_policy.py
+index 80cfdd4..1c4e1ac 100644
+--- a/slowfast/utils/lr_policy.py
++++ b/slowfast/utils/lr_policy.py
+@@ -4,6 +4,7 @@
+ """Learning rate policy."""
+ 
+ import math
++import numpy as np
+ 
+ 
+ def get_lr_at_epoch(cfg, cur_epoch):
+@@ -27,6 +28,15 @@ def get_lr_at_epoch(cfg, cur_epoch):
+     return lr
+ 
+ 
++def lr_func_onecycle(cfg, cur_epoch):
++    t_initial = cfg.SOLVER.MAX_EPOCH
++    t = cur_epoch
++    lr_max = cfg.SOLVER.BASE_LR
++    lr = np.interp([t], [0, t_initial*2//5, t_initial*4//5, t_initial],
++            [0, lr_max, lr_max/20.0, 0])[0]
++    return lr
++
++
+ def lr_func_cosine(cfg, cur_epoch):
+     """
+     Retrieve the learning rate to specified values at specified epoch with the
+diff --git a/slowfast/utils/misc.py b/slowfast/utils/misc.py
+index d7217c2..901e07d 100644
+--- a/slowfast/utils/misc.py
++++ b/slowfast/utils/misc.py
+@@ -163,7 +163,11 @@ def get_model_stats(model, cfg, mode, use_train_input):
+     model_mode = model.training
+     model.eval()
+     inputs = _get_model_analysis_input(cfg, use_train_input)
+-    count_dict, *_ = model_stats_fun(model, inputs)
++    # modification for ImageNet
++    if cfg.TRAIN.DATASET == "imagenet":
++        count_dict, *_ = model_stats_fun(model, inputs[0])
++    else:
++        count_dict, *_ = model_stats_fun(model, inputs)
+     count = sum(count_dict.values())
+     model.train(model_mode)
+     return count
+diff --git a/slowfast/utils/weight_init_helper.py b/slowfast/utils/weight_init_helper.py
+index 0a2d65d..2be56a4 100644
+--- a/slowfast/utils/weight_init_helper.py
++++ b/slowfast/utils/weight_init_helper.py
+@@ -16,7 +16,7 @@ def init_weights(model, fc_init_std=0.01, zero_init_final_bn=True):
+             every bottleneck.
+     """
+     for m in model.modules():
+-        if isinstance(m, nn.Conv3d):
++        if isinstance(m, nn.Conv3d) or isinstance(m, nn.Conv2d):
+             """
+             Follow the initialization method proposed in:
+             {He, Kaiming, et al.
+@@ -25,7 +25,7 @@ def init_weights(model, fc_init_std=0.01, zero_init_final_bn=True):
+             arXiv preprint arXiv:1502.01852 (2015)}
+             """
+             c2_msra_fill(m)
+-        elif isinstance(m, nn.BatchNorm3d):
++        elif isinstance(m, nn.BatchNorm3d) or isinstance(m, nn.BatchNorm2d):
+             if (
+                 hasattr(m, "transform_final_bn")
+                 and m.transform_final_bn
+diff --git a/tools/train_net.py b/tools/train_net.py
+index 6b6ff22..1c64f25 100644
+--- a/tools/train_net.py
++++ b/tools/train_net.py
+@@ -205,7 +205,6 @@ def train_epoch(
+     train_meter.log_epoch_stats(cur_epoch)
+     train_meter.reset()
+ 
+-
+ @torch.no_grad()
+ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
+     """
+@@ -220,14 +219,13 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, writer=None):
+         writer (TensorboardWriter, optional): TensorboardWriter object
+             to writer Tensorboard log.
+     """
+-
+     # Evaluation mode enabled. The running stats would not be updated.
+     model.eval()
+     val_meter.iter_tic()
+ 
+     for cur_iter, (inputs, labels, _, meta) in enumerate(val_loader):
+         if cfg.NUM_GPUS:
+-            # Transferthe data to the current GPU device.
++            # Transfer the data to the current GPU device.
+             if isinstance(inputs, (list,)):
+                 for i in range(len(inputs)):
+                     inputs[i] = inputs[i].cuda(non_blocking=True)
+-- 
+2.17.1
+
+
+From f588dcfdd04e70331bd137477851605778a45a12 Mon Sep 17 00:00:00 2001
+From: Chien-Yu Lin <cyulin@cs.washington.edu>
+Date: Fri, 17 Jun 2022 23:29:10 +0000
+Subject: [PATCH 2/2] update checkpoint
+
+---
+ slowfast/utils/checkpoint.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/slowfast/utils/checkpoint.py b/slowfast/utils/checkpoint.py
+index 227a657..abf1de7 100644
+--- a/slowfast/utils/checkpoint.py
++++ b/slowfast/utils/checkpoint.py
+@@ -127,9 +127,11 @@ def save_checkpoint(path_to_job, model, optimizer, epoch, cfg, scaler=None):
+     checkpoint = {
+         "epoch": epoch,
+         "model_state": normalized_sd,
+-        "optimizer_state": optimizer.state_dict(),
++        # "optimizer_state": optimizer.state_dict(),
+         "cfg": cfg.dump(),
+     }
++    if optimizer is not None:
++        checkpoint["optimizer_state"] = optimizer.state_dict()
+     if scaler is not None:
+         checkpoint["scaler_state"] = scaler.state_dict()
+     # Write the checkpoint.
+@@ -491,7 +493,7 @@ def load_test_checkpoint(cfg, model):
+         )
+ 
+ 
+-def load_train_checkpoint(cfg, model, optimizer, scaler=None):
++def load_train_checkpoint(cfg, model, optimizer=None, scaler=None):
+     """
+     Loading checkpoint logic for training.
+     """
+-- 
+2.17.1
+
