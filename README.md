@@ -1,5 +1,5 @@
 # SPIN
-This repository contains the official implementation for the ECCV'22 paper, "SPIN: An Empirical Evaluation on Sharing Parameters of Isotropic Networks".
+This repository contains the official implementation for the ECCV'22 paper, ["SPIN: An Empirical Evaluation on Sharing Parameters of Isotropic Networks"](https://arxiv.org/abs/2207.10237).
 
 ## Code Overview
 We provide the implementation of weight sharing version of the [ConvMixer](https://openreview.net/pdf?id=TVHS5Y4dNvM) model. The main code for the implementation are in the `models` directory. The model can be configured by the files in `configs`. We provide three example configs.
